@@ -34,6 +34,9 @@ Thumbs.db
 .claude-flow/
 .hive-mind/
 
+# AC-S15 observability session logs (per-session JSONL, not source)
+data/observability/
+
 # Auto-generated index file (PD's obsidian_sync regenerates)
 CLAUDE.md
 
