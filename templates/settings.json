@@ -1,0 +1,47 @@
+{
+  "_comment": "Per-role engine config (AC-S2 schema, AC-S9 resolver, AC-S14 human-engine fields). Layer defaults below match Preston's 2026-05-13 sign-off. Per-role overrides land under 'roles'. Setting engine='human' opens the pause-and-prompt path (AC-S14); add handoff_to + handoff_trigger to enable mid-flight AI continuation.",
+  "engines": {
+    "L4": "ollama-local",
+    "L5": "claude-haiku",
+    "L6": "claude-sonnet",
+    "L7": "claude-opus",
+    "L8": "claude-opus"
+  },
+  "roles": {
+    "coder": {
+      "level": "L4"
+    },
+    "qa": {
+      "level": "L4"
+    },
+    "playtester": {
+      "level": "L4"
+    },
+    "grader": {
+      "level": "L4",
+      "engine": "claude-sonnet",
+      "_comment": "High-compute L4 override (per the per-role-within-layer rule)."
+    },
+    "swarm": {
+      "level": "L5"
+    },
+    "queen": {
+      "level": "L6"
+    },
+    "dispatch": {
+      "level": "L7"
+    },
+    "project-manager": {
+      "level": "L8"
+    },
+    "context-inspector": {
+      "level": "L5",
+      "engine": "human",
+      "handoff_to": "claude-sonnet",
+      "handoff_trigger": {
+        "on_keyword": "/continue"
+      },
+      "_comment": "AC-S14 example: Preston sits in the L5 seat to verify the prompt+context, then hands off mid-flight to claude-sonnet via '/continue'."
+    }
+  }
+}
