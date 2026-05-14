@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "agent-controller-claude-pack",
+  "version": "0.1.0",
+  "description": "Claude Code primitives for the agent-controller app: L4-L8 hierarchy templates, multi-engine driver, L8 PM tooling.",
+  "author": {
+    "name": "Toon-Red",
+    "url": "https://github.com/Toon-Red/agent-controller"
+  },
+  "homepage": "https://github.com/Toon-Red/agent-controller",
+  "repository": "https://github.com/Toon-Red/agent-controller",
+  "license": "MIT",
+  "keywords": [
+    "agent-hierarchy",
+    "ruflo",
+    "claude-flow",
+    "claude-code",
+    "L4",
+    "L5",
+    "L6",
+    "L7",
+    "L8"
+  ],
+  "commands": ".claude/commands",
+  "skills": ".claude/skills",
+  "agents": ".claude/agents",
+  "hooks": ".claude/settings.json"
+}

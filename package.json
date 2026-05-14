@@ -1,0 +1,22 @@
+{
+  "name": "agent-controller",
+  "version": "0.1.0",
+  "description": "L4-L8 agent hierarchy wrapping claude-flow for queen primitives. Per-role engine config, multi-engine driver, L8 PM component.",
+  "private": true,
+  "license": "MIT",
+  "author": {
+    "name": "Toon-Red",
+    "url": "https://github.com/Toon-Red/agent-controller"
+  },
+  "scripts": {
+    "ruflo": "claude-flow",
+    "hive-spawn": "claude-flow hive-mind spawn",
+    "ruflo-version": "claude-flow --version"
+  },
+  "dependencies": {
+    "claude-flow": "3.7.0-alpha.34"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

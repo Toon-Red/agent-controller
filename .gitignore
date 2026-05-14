@@ -1,0 +1,41 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# Virtualenvs
+.venv/
+venv/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code local state
+.claude/state/
+.claude/settings.local.json
+
+# claude-flow runtime artefacts
+.claude-flow/
+.hive-mind/
+
+# Auto-generated index file (PD's obsidian_sync regenerates)
+CLAUDE.md
+
+# Auto-generated wiki view
+wiki/
