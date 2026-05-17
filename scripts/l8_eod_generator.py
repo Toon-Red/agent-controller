@@ -109,6 +109,9 @@ class EODSections:
     trajectory_delta: tuple[str, ...] = ()
     previous_eod_date: Optional[str] = None
     completion_counts: Mapping[str, int] = field(default_factory=dict)
+    audit_open_flagged: Mapping[str, int] = field(default_factory=dict)
+    previous_audit_open_flagged: Mapping[str, int] = field(default_factory=dict)
+    audit_delta: Mapping[str, int] = field(default_factory=dict)
 
     def is_quiet(self) -> bool:
         """True when nothing material happened or is queued.
@@ -160,7 +163,16 @@ def extract_eod_sections(
     trajectory = _build_trajectory_delta(snapshot)
     counts = _completion_counts(snapshot.pd_tasks, today_iso=today_iso)
 
-    prev_eod = (snapshot.workflow_state or {}).get("last_eod_date")
+    ws = snapshot.workflow_state or {}
+    prev_eod = ws.get("last_eod_date")
+
+    audit_current = _normalise_audit_counts(
+        getattr(snapshot, "audit_open_flagged", None)
+    )
+    audit_previous = _normalise_audit_counts(
+        ws.get("last_audit_open_flagged")
+    )
+    audit_delta = _compute_audit_delta(audit_current, audit_previous)
 
     return EODSections(
         today_iso=today_iso,
@@ -172,6 +184,9 @@ def extract_eod_sections(
         trajectory_delta=trajectory,
         previous_eod_date=prev_eod if isinstance(prev_eod, str) else None,
         completion_counts=counts,
+        audit_open_flagged=audit_current,
+        previous_audit_open_flagged=audit_previous,
+        audit_delta=audit_delta,
     )
 
 
@@ -306,6 +321,64 @@ def _completion_counts(tasks: Sequence[Mapping[str, Any]],
     return counts
 
 
+def _normalise_audit_counts(value: Any) -> dict[str, int]:
+    """Coerce the audit per-project payload into ``{project_id: int}``.
+
+    Accepts ``None``, a mapping ``{pid: int}``, or a mapping where the
+    value is itself a dict with an ``open_flagged`` int (the shape the
+    state reader might pre-roll). Anything else returns ``{}`` so the
+    audit_delta line stays well-defined even with sad-path inputs.
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    out: dict[str, int] = {}
+    for pid, raw in value.items():
+        if pid is None:
+            continue
+        if isinstance(raw, bool):  # bool is an int subclass; reject explicitly.
+            continue
+        if isinstance(raw, int):
+            out[str(pid)] = int(raw)
+        elif isinstance(raw, Mapping):
+            inner = raw.get("open_flagged")
+            if isinstance(inner, int) and not isinstance(inner, bool):
+                out[str(pid)] = int(inner)
+    return out
+
+
+def _compute_audit_delta(
+    current: Mapping[str, int],
+    previous: Mapping[str, int],
+) -> dict[str, int]:
+    """Per-project signed delta ``current - previous``, non-zero only.
+
+    Keys are sorted to keep the rendered prompt deterministic so two
+    EOD runs against the same snapshot produce byte-identical bytes.
+    """
+    keys = sorted(set(current) | set(previous))
+    deltas: dict[str, int] = {}
+    for k in keys:
+        d = int(current.get(k, 0)) - int(previous.get(k, 0))
+        if d != 0:
+            deltas[k] = d
+    return deltas
+
+
+def _format_audit_delta_line(deltas: Mapping[str, int]) -> str:
+    """Return the single ``audit_delta: ...`` line for the EOD prompt.
+
+    Format mirrors the AC-L8DOC1 proposal: comma-separated
+    ``<project> <+/-N>`` pairs when there is movement, or the literal
+    sentinel ``audit_delta: stable`` when everything is flat.
+    """
+    if not deltas:
+        return "audit_delta: stable"
+    parts = [
+        f"{pid} {delta:+d}" for pid, delta in deltas.items()
+    ]
+    return "audit_delta: " + ", ".join(parts)
+
+
 def _priority_sort_key(item: Mapping[str, Any]) -> tuple[int, str]:
     priority = str(item.get("priority") or "").lower()
     rank = PRIORITY_RANK.get(priority, _UNKNOWN_PRIORITY_RANK)
@@ -411,6 +484,12 @@ class L8EODGenerator:
         blocks.append(
             "=== COMPLETION COUNTS ===\n"
             + json.dumps(dict(sections.completion_counts), sort_keys=True)
+        )
+        # AC-S16d-AUDITLINE: single relative-change line summarising
+        # per-project (open+flagged) audit movement vs the previous EOD.
+        blocks.append(
+            "=== AUDIT DELTA ===\n"
+            + _format_audit_delta_line(sections.audit_delta)
         )
         blocks.append(_format_block(
             "DONE TODAY", _format_task_lines(sections.done_today),
@@ -648,11 +727,17 @@ def mark_eod_complete(
     *,
     today_iso: Optional[str] = None,
     now: Optional[Callable[[], float]] = None,
+    audit_open_flagged: Optional[Mapping[str, int]] = None,
 ) -> dict[str, Any]:
     """Update ``automation-registry/data/workflow_state.json`` after EOD.
 
     Mirrors :func:`scripts.l8_sod_generator.mark_sod_complete`: reads,
     sets ``last_eod_date``, writes atomically (tmp + replace).
+
+    When ``audit_open_flagged`` is provided, the per-project
+    (open + flagged) counts captured at this EOD are persisted under
+    ``last_audit_open_flagged`` so the next EOD can render an
+    ``audit_delta`` line relative to today (AC-S16d-AUDITLINE).
     """
     path = Path(workflow_state_path)
     if today_iso is None:
@@ -666,6 +751,10 @@ def mark_eod_complete(
     except (OSError, ValueError):
         existing = {}
     existing["last_eod_date"] = today_iso
+    if audit_open_flagged is not None:
+        existing["last_audit_open_flagged"] = dict(
+            _normalise_audit_counts(audit_open_flagged)
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(existing, indent=2, sort_keys=True),

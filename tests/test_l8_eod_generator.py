@@ -32,6 +32,7 @@ def _snapshot(**overrides):
         "calendar_events": [],
         "calendar_upcoming": [],
         "workflow_state": {},
+        "audit_open_flagged": {},
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -251,6 +252,142 @@ class TestMarkEodComplete:
         path.write_text("not json {}{")  # garbage
         result = eod.mark_eod_complete(path, today_iso="2026-05-14")
         assert result == {"last_eod_date": "2026-05-14"}
+
+
+# ---------------------------------------------------------------------------
+# AC-S16d-AUDITLINE: audit_delta in the EOD digest
+# ---------------------------------------------------------------------------
+
+class TestAuditDeltaLine:
+    """The EOD prompt MUST carry one 'audit_delta:' line per render.
+
+    Per AC-S16d-AUDITLINE: emit one '<project> <signed-delta>' entry for
+    each project whose (open+flagged) count moved vs the previous EOD,
+    or the literal 'stable' sentinel when nothing moved.
+    """
+
+    def _extract_audit_line(self, prompt: str) -> str:
+        for line in prompt.splitlines():
+            if line.startswith("audit_delta:"):
+                return line
+        raise AssertionError(
+            f"no audit_delta line in EOD prompt:\n{prompt}"
+        )
+
+    def test_audit_line_present_when_counts_differ(self):
+        # Current counts > previous: surface the deltas.
+        snap = _snapshot(
+            audit_open_flagged={"dream": 5, "agent-controller": 2},
+            workflow_state={
+                "last_audit_open_flagged": {
+                    "dream": 2, "agent-controller": 3,
+                },
+            },
+        )
+        prompt = eod.L8EODGenerator().render(snap)
+        line = self._extract_audit_line(prompt)
+        # dream went 2 -> 5 (+3); agent-controller went 3 -> 2 (-1).
+        assert "dream +3" in line
+        assert "agent-controller -1" in line
+        assert "stable" not in line
+
+    def test_audit_line_stable_when_counts_match(self):
+        # Same counts -> single 'stable' sentinel, no deltas.
+        snap = _snapshot(
+            audit_open_flagged={"dream": 5, "agent-controller": 2},
+            workflow_state={
+                "last_audit_open_flagged": {
+                    "dream": 5, "agent-controller": 2,
+                },
+            },
+        )
+        prompt = eod.L8EODGenerator().render(snap)
+        line = self._extract_audit_line(prompt)
+        assert line == "audit_delta: stable"
+
+    def test_audit_line_stable_on_first_run(self):
+        # No persisted baseline and no current counts: must still emit
+        # the line (every EOD carries one) and it must be 'stable'.
+        snap = _snapshot()
+        prompt = eod.L8EODGenerator().render(snap)
+        assert "audit_delta: stable" in prompt
+
+    def test_audit_line_treats_missing_project_as_zero(self):
+        # Project disappeared from current -> negative delta.
+        # Project appeared in current -> positive delta.
+        snap = _snapshot(
+            audit_open_flagged={"new-proj": 4},
+            workflow_state={
+                "last_audit_open_flagged": {"old-proj": 3},
+            },
+        )
+        line = self._extract_audit_line(eod.L8EODGenerator().render(snap))
+        assert "new-proj +4" in line
+        assert "old-proj -3" in line
+
+    def test_audit_sections_populated(self):
+        snap = _snapshot(
+            audit_open_flagged={"dream": 5},
+            workflow_state={
+                "last_audit_open_flagged": {"dream": 2},
+            },
+        )
+        s = eod.extract_eod_sections(snap)
+        assert s.audit_open_flagged == {"dream": 5}
+        assert s.previous_audit_open_flagged == {"dream": 2}
+        assert s.audit_delta == {"dream": 3}
+
+    def test_audit_normalises_inner_dict_shape(self):
+        # State reader may pre-roll as {pid: {"open_flagged": N}}.
+        snap = _snapshot(
+            audit_open_flagged={"dream": {"open_flagged": 7}},
+            workflow_state={
+                "last_audit_open_flagged": {
+                    "dream": {"open_flagged": 1},
+                },
+            },
+        )
+        s = eod.extract_eod_sections(snap)
+        assert s.audit_open_flagged == {"dream": 7}
+        assert s.audit_delta == {"dream": 6}
+
+    def test_audit_delta_deterministic_key_order(self):
+        # Two renders against the same snapshot must produce identical
+        # bytes (project ids sorted -> deterministic line content).
+        snap = _snapshot(
+            audit_open_flagged={"zeta": 1, "alpha": 1, "mu": 1},
+            workflow_state={"last_audit_open_flagged": {}},
+        )
+        gen = eod.L8EODGenerator()
+        line = self._extract_audit_line(gen.render(snap))
+        # Sorted: alpha, mu, zeta.
+        assert line.index("alpha") < line.index("mu") < line.index("zeta")
+
+    def test_mark_eod_complete_persists_audit_counts(self, tmp_path):
+        path = tmp_path / "workflow_state.json"
+        result = eod.mark_eod_complete(
+            path,
+            today_iso="2026-05-14",
+            audit_open_flagged={"dream": 5, "agent-controller": 2},
+        )
+        assert result["last_audit_open_flagged"] == {
+            "dream": 5, "agent-controller": 2,
+        }
+        # Round-trip: a follow-up render with the new state file should
+        # be 'stable' against the same current counts.
+        snap = _snapshot(
+            audit_open_flagged={"dream": 5, "agent-controller": 2},
+            workflow_state=json.loads(path.read_text()),
+        )
+        prompt = eod.L8EODGenerator().render(snap)
+        assert "audit_delta: stable" in prompt
+
+    def test_mark_eod_complete_omits_audit_when_not_supplied(self, tmp_path):
+        # Back-compat: existing callers that don't pass the new kwarg
+        # don't get a stale-baseline key written.
+        path = tmp_path / "workflow_state.json"
+        result = eod.mark_eod_complete(path, today_iso="2026-05-14")
+        assert "last_audit_open_flagged" not in result
 
 
 # ---------------------------------------------------------------------------
