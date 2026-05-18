@@ -1,0 +1,64 @@
+---
+name: sync-quota
+description: Re-sync the automation-registry quota state from claude.ai/settings/usage via Chrome MCP (AC-L8QUOTA1). Reads the live session + weekly reset countdowns, parses them to ISO 8601, POSTs to localhost:5050.
+---
+
+# /sync-quota — re-sync quota state from claude.ai Usage page
+
+Operator-anchored quota state (AR-S3k option A) is the **primary** source.
+This command runs option B as a **daily corrective re-sync** so the registry
+value never drifts more than 24h from reality.
+
+## Procedure
+
+1. **Connect to Chrome MCP.** Call `mcp__Claude_in_Chrome__list_connected_browsers`. If empty, surface: "Chrome MCP extension not connected — operator-anchored state remains authoritative; no re-sync this run." Exit.
+
+2. **Open / reuse a tab.** Call `mcp__Claude_in_Chrome__tabs_context_mcp` with `createIfEmpty=true`. Pick a tabId from the returned group.
+
+3. **Navigate.** `mcp__Claude_in_Chrome__navigate` with `url: "https://claude.ai/settings/usage"` and the tabId from step 2.
+
+4. **Wait for render.** The Usage panel renders skeleton-first. Wait ~3s before reading, then call `mcp__Claude_in_Chrome__get_page_text` (or `read_page`) for the tabId.
+
+5. **Parse the two timer values.** Anchor on labels, not positional indices:
+
+   - **Session window:** find the line beginning with "Current session" (case-insensitive). The same paragraph contains "Resets in X hr Y min" (or "Resets in X min"). Compute `session_reset_at = now_utc + timedelta(hours=X, minutes=Y)`. Format as `YYYY-MM-DDTHH:MM:SSZ`.
+
+   - **Weekly window:** find the line containing "Weekly limits" or "All models". The same block contains "Resets <Weekday> <H:MM AM/PM>" (e.g. "Resets Tue 6:00 PM"). Compute the next occurrence of that weekday + time in Preston's local timezone, then convert to UTC ISO 8601 with timezone offset (NOT Z, since this is local). Use `+TZ:00` suffix.
+
+   If either label is missing from the page, log "[ABSENT]" for that window and skip its POST — partial re-sync is fine, don't fabricate.
+
+6. **POST to the registry, one call per kind.** For each parsed value:
+
+   ```sh
+   curl -X POST http://127.0.0.1:5050/api/registry/quota \
+        -H 'Content-Type: application/json' \
+        -d '{"reset_at": "<ISO>", "window_kind": "session" or "weekly"}'
+   ```
+
+   Expect 200 + the full state dict in response. On non-200, log the body + status and continue (don't abort on one bad POST).
+
+7. **Record the last-sync timestamp.** Append a line to `data/last_quota_sync.json` (in Dream's data dir) with `{"timestamp": now_iso, "session": <iso or null>, "weekly": <iso or null>}`. The SessionStart hook reads this to decide whether to re-prompt today.
+
+8. **Summarize.** Print a one-line summary: `synced session=<iso> weekly=<iso>` (or "session=ABSENT" etc.). Show drift if session reset differs from the operator-anchored value by >5 minutes (`old vs new` line).
+
+## Drift handling
+
+If the Chrome read disagrees with the operator value by >5 min: that's a
+re-sync correction — the Chrome value wins (it's the live UI). Surface the
+delta in the summary so the operator knows their manual entry was slightly
+off (clock drift between operator's wall watch and Anthropic's server).
+
+## Failure modes
+
+- Chrome MCP not connected -> log + exit cleanly. Operator value stays
+  authoritative.
+- claude.ai requires re-auth -> the page will redirect to login. Detect
+  via `page.url.includes("/login")` and surface "operator must log in" + exit.
+- Both timer labels absent -> page format changed; log + exit cleanly.
+  File a follow-up task on agent-controller.
+- Registry POST 4xx/5xx -> log body + continue to the other kind.
+
+## When to run
+
+- Daily via the SessionStart hook (auto, when last sync >12h old).
+- On-demand: Preston runs `/sync-quota` directly when they suspect drift.
