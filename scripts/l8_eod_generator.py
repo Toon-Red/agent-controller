@@ -112,6 +112,13 @@ class EODSections:
     audit_open_flagged: Mapping[str, int] = field(default_factory=dict)
     previous_audit_open_flagged: Mapping[str, int] = field(default_factory=dict)
     audit_delta: Mapping[str, int] = field(default_factory=dict)
+    # AC-L8DOC1b: documentation hygiene rollup. Populated only when
+    # snapshot.documentation_audit reports missing tasks; empty dict
+    # signals "silent on a clean day". Shape:
+    #   {"missing_count": int, "coverage_pct": float,
+    #    "items": tuple[Mapping[str, Any], ...]}  -- each item:
+    #     {"project_id", "task_id", "title", "missing": ["tests","wiki"]}
+    documentation_hygiene: Mapping[str, Any] = field(default_factory=dict)
 
     def is_quiet(self) -> bool:
         """True when nothing material happened or is queued.
@@ -174,6 +181,10 @@ def extract_eod_sections(
     )
     audit_delta = _compute_audit_delta(audit_current, audit_previous)
 
+    documentation_hygiene = _extract_documentation_hygiene(
+        getattr(snapshot, "documentation_audit", None) or {}
+    )
+
     return EODSections(
         today_iso=today_iso,
         done_today=done,
@@ -187,7 +198,72 @@ def extract_eod_sections(
         audit_open_flagged=audit_current,
         previous_audit_open_flagged=audit_previous,
         audit_delta=audit_delta,
+        documentation_hygiene=documentation_hygiene,
     )
+
+
+# AC-L8DOC1b: documentation hygiene extractor.
+DOC_HYGIENE_CAP = 10
+
+
+def _extract_documentation_hygiene(
+    audit: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Roll the /api/tasks/audit payload into a flat per-task list.
+
+    Each item carries which categories the task is missing (tests,
+    wiki, or both) so the EOD render can show '[missing: tests, wiki]'.
+    Returns an empty dict when no tasks are missing -- caller must
+    check ``missing_count > 0`` (or equivalently truthy items).
+
+    Sort order is deterministic: (project_id, task_id).
+    """
+    if not isinstance(audit, Mapping):
+        return {}
+    by_project = audit.get("by_project") or {}
+    if not isinstance(by_project, Mapping):
+        return {}
+    items: list[Mapping[str, Any]] = []
+    for pid, proj in by_project.items():
+        if not isinstance(proj, Mapping):
+            continue
+        # Build a per-task -> set-of-missing-categories map so a task
+        # appearing in both `missing_tests` and `missing_wiki` (and
+        # therefore also `missing_both`) gets a single entry.
+        per_task: dict[str, dict[str, Any]] = {}
+        for category, key in (
+            ("tests", "missing_tests"),
+            ("wiki", "missing_wiki"),
+            ("both", "missing_both"),
+        ):
+            for task in proj.get(key) or ():
+                if not isinstance(task, Mapping):
+                    continue
+                tid = task.get("id")
+                if not isinstance(tid, str):
+                    continue
+                entry = per_task.setdefault(tid, {
+                    "project_id": str(pid),
+                    "task_id": tid,
+                    "title": str(task.get("title") or ""),
+                    "_missing": set(),
+                })
+                if category == "both":
+                    entry["_missing"].update(("tests", "wiki"))
+                else:
+                    entry["_missing"].add(category)
+        for entry in per_task.values():
+            missing = tuple(sorted(entry.pop("_missing")))
+            items.append({**entry, "missing": missing})
+    if not items:
+        return {}
+    items.sort(key=lambda it: (it["project_id"], it["task_id"]))
+    return {
+        "missing_count": len(items),
+        "coverage_pct": audit.get("coverage_pct"),
+        "items": tuple(items[:DOC_HYGIENE_CAP]),
+        "items_truncated": len(items) > DOC_HYGIENE_CAP,
+    }
 
 
 def _calendar_tomorrow_or_upcoming(snap: StateSnapshot
@@ -651,6 +727,16 @@ def build_discord_embed(
             ),
             "inline": False,
         })
+    # AC-L8DOC1b: render only when there's something to surface.
+    if sections.documentation_hygiene.get("missing_count"):
+        fields.append({
+            "name": _doc_hygiene_heading(sections.documentation_hygiene),
+            "value": _truncate(
+                "\n".join(_format_doc_hygiene_lines(sections.documentation_hygiene)),
+                field_value_cap,
+            ),
+            "inline": False,
+        })
 
     return {
         "title": title,
@@ -658,6 +744,34 @@ def build_discord_embed(
         "color": color,
         "fields": fields,
     }
+
+
+def _doc_hygiene_heading(hygiene: Mapping[str, Any]) -> str:
+    """Section heading like 'Documentation hygiene (3 tasks, 87% coverage)'."""
+    count = hygiene.get("missing_count", 0)
+    coverage = hygiene.get("coverage_pct")
+    base = f"Documentation hygiene ({count} task{'' if count == 1 else 's'})"
+    if isinstance(coverage, (int, float)):
+        return f"{base[:-1]}, {coverage:g}% coverage)"
+    return base
+
+
+def _format_doc_hygiene_lines(hygiene: Mapping[str, Any]) -> tuple[str, ...]:
+    """Format each item as '- <pid>: <task-id> <title> [missing: tests, wiki]'."""
+    items = hygiene.get("items") or ()
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        pid = item.get("project_id") or "?"
+        tid = item.get("task_id") or "?"
+        title = (item.get("title") or "").strip() or "(untitled)"
+        missing = item.get("missing") or ()
+        missing_str = ", ".join(missing) if missing else "?"
+        out.append(f"- {pid}: {tid} {title} [missing: {missing_str}]")
+    if hygiene.get("items_truncated"):
+        out.append(f"- ... and more (capped at {DOC_HYGIENE_CAP})")
+    return tuple(out)
 
 
 def build_dream_markdown(body: str, sections: EODSections) -> str:
@@ -701,6 +815,12 @@ def build_dream_markdown(body: str, sections: EODSections) -> str:
         "Trajectory delta",
         tuple(f"- {line}" for line in sections.trajectory_delta),
     )
+    # AC-L8DOC1b: silent when zero.
+    if sections.documentation_hygiene.get("missing_count"):
+        _section(
+            _doc_hygiene_heading(sections.documentation_hygiene),
+            _format_doc_hygiene_lines(sections.documentation_hygiene),
+        )
     return "\n".join(parts).rstrip() + "\n"
 
 

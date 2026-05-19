@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import l8_eod_generator as eod
+from scripts.l8_project_manager import StateSnapshot
 
 
 # Reference timestamp: 2026-05-14 18:00 local.
@@ -411,3 +412,131 @@ def test_format_parity_with_sod():
     assert sod._COLOR_GREEN == eod._COLOR_GREEN
     assert sod._COLOR_AMBER == eod._COLOR_AMBER
     assert sod._COLOR_RED == eod._COLOR_RED
+
+
+# ---------------------------------------------------------------------------
+# AC-L8DOC1b: documentation_hygiene section
+# ---------------------------------------------------------------------------
+
+
+def _audit_with_missing() -> dict:
+    """Sample /api/tasks/audit payload with two missing tasks across two projects."""
+    return {
+        "by_project": {
+            "dream": {
+                "total": 12, "documented": 11,
+                "missing_tests": [
+                    {"id": "t1", "title": "Add wiki sync", "status": "todo"},
+                ],
+                "missing_wiki": [],
+                "missing_both": [],
+                "project_name": "Dream",
+            },
+            "agent-controller": {
+                "total": 24, "documented": 22,
+                "missing_tests": [],
+                "missing_wiki": [],
+                "missing_both": [
+                    {"id": "t2", "title": "EOD card", "status": "in_progress"},
+                ],
+                "project_name": "Agent Controller",
+            },
+        },
+        "total": 36, "documented": 33, "coverage_pct": 91.7,
+    }
+
+
+def test_doc_hygiene_silent_when_audit_empty():
+    snap = StateSnapshot(documentation_audit={}, captured_at=1_700_000_000.0)
+    sections = eod.extract_eod_sections(snap)
+    assert sections.documentation_hygiene == {}
+
+
+def test_doc_hygiene_silent_when_no_missing():
+    audit = {"by_project": {"dream": {"missing_tests": [], "missing_wiki": [],
+                                         "missing_both": []}}, "coverage_pct": 100.0}
+    snap = StateSnapshot(documentation_audit=audit, captured_at=1_700_000_000.0)
+    sections = eod.extract_eod_sections(snap)
+    assert sections.documentation_hygiene == {}
+
+
+def test_doc_hygiene_populates_when_missing():
+    snap = StateSnapshot(documentation_audit=_audit_with_missing(),
+                         captured_at=1_700_000_000.0)
+    sections = eod.extract_eod_sections(snap)
+    hyg = sections.documentation_hygiene
+    assert hyg["missing_count"] == 2
+    assert hyg["coverage_pct"] == 91.7
+    assert hyg["items_truncated"] is False
+    items = hyg["items"]
+    assert len(items) == 2
+    # Sort order: (project_id, task_id)
+    assert items[0]["project_id"] == "agent-controller"
+    assert items[0]["task_id"] == "t2"
+    assert items[0]["missing"] == ("tests", "wiki")  # 'both' -> tests + wiki
+    assert items[1]["project_id"] == "dream"
+    assert items[1]["task_id"] == "t1"
+    assert items[1]["missing"] == ("tests",)
+
+
+def test_doc_hygiene_caps_at_ten_with_truncation_flag():
+    by_project = {"p": {"missing_tests": [
+        {"id": f"t{i:02d}", "title": f"Task {i}", "status": "todo"}
+        for i in range(15)
+    ], "missing_wiki": [], "missing_both": []}}
+    snap = StateSnapshot(
+        documentation_audit={"by_project": by_project, "coverage_pct": 50.0},
+        captured_at=1_700_000_000.0,
+    )
+    sections = eod.extract_eod_sections(snap)
+    hyg = sections.documentation_hygiene
+    assert hyg["missing_count"] == 15
+    assert len(hyg["items"]) == 10
+    assert hyg["items_truncated"] is True
+
+
+def test_doc_hygiene_absent_from_embed_when_silent():
+    snap = StateSnapshot(documentation_audit={}, captured_at=1_700_000_000.0)
+    sections = eod.extract_eod_sections(snap)
+    embed = eod.build_discord_embed("body", sections)
+    field_names = {f["name"] for f in embed["fields"]}
+    assert not any("Documentation hygiene" in n for n in field_names)
+
+
+def test_doc_hygiene_present_in_embed_when_missing():
+    snap = StateSnapshot(documentation_audit=_audit_with_missing(),
+                         captured_at=1_700_000_000.0)
+    sections = eod.extract_eod_sections(snap)
+    embed = eod.build_discord_embed("body", sections)
+    matches = [f for f in embed["fields"] if "Documentation hygiene" in f["name"]]
+    assert len(matches) == 1
+    field = matches[0]
+    assert "2 tasks" in field["name"]
+    assert "91.7% coverage" in field["name"]
+    assert "agent-controller: t2" in field["value"]
+    assert "missing: tests, wiki" in field["value"]
+
+
+def test_doc_hygiene_absent_from_markdown_when_silent():
+    snap = StateSnapshot(documentation_audit={}, captured_at=1_700_000_000.0)
+    sections = eod.extract_eod_sections(snap)
+    md = eod.build_dream_markdown("body", sections)
+    assert "Documentation hygiene" not in md
+
+
+def test_doc_hygiene_present_in_markdown_when_missing():
+    snap = StateSnapshot(documentation_audit=_audit_with_missing(),
+                         captured_at=1_700_000_000.0)
+    sections = eod.extract_eod_sections(snap)
+    md = eod.build_dream_markdown("body", sections)
+    assert "## Documentation hygiene" in md
+    assert "dream: t1 Add wiki sync [missing: tests]" in md
+    assert "agent-controller: t2 EOD card [missing: tests, wiki]" in md
+
+
+def test_doc_hygiene_handles_non_mapping_audit():
+    """Defensive: bad shape from upstream -> silent."""
+    for bad in ({"by_project": "not a dict"}, {"by_project": None}, {"by_project": 42}):
+        snap = StateSnapshot(documentation_audit=bad, captured_at=1_700_000_000.0)
+        sections = eod.extract_eod_sections(snap)
+        assert sections.documentation_hygiene == {}, f"bad shape {bad!r}"
