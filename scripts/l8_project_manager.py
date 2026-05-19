@@ -115,6 +115,12 @@ class StateSnapshot:
     pd_projects: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     calendar_events: tuple[Mapping[str, Any], ...] = ()
     workflow_state: Mapping[str, Any] = field(default_factory=dict)
+    # AC-L8DOC1a: documentation-audit payload from GET /api/tasks/audit.
+    # Shape: {"by_project": {pid: {total, documented, missing_tests,
+    # missing_wiki, missing_both, project_name}}, "total", "documented",
+    # "coverage_pct"}. Empty dict when the endpoint is unreachable
+    # (fail-open). EOD generator (AC-L8DOC1b) is the canonical consumer.
+    documentation_audit: Mapping[str, Any] = field(default_factory=dict)
     captured_at: float = 0.0
 
 

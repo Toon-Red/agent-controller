@@ -155,6 +155,8 @@ class PDCalendarSnapshot:
     calendar_today: tuple[Mapping[str, Any], ...] = ()
     calendar_upcoming: tuple[Mapping[str, Any], ...] = ()
     workflow_state: Mapping[str, Any] = field(default_factory=dict)
+    # AC-L8DOC1a: GET /api/tasks/audit payload (aggregate + per-project).
+    documentation_audit: Mapping[str, Any] = field(default_factory=dict)
     captured_at: float = 0.0
 
     # ------------------------------------------------------------------
@@ -206,6 +208,7 @@ class PDCalendarSnapshot:
             pd_projects=dict(self.projects),
             calendar_events=self.calendar_today + self.calendar_upcoming,
             workflow_state=dict(self.workflow_state),
+            documentation_audit=dict(self.documentation_audit),
             captured_at=self.captured_at,
         )
 
@@ -242,6 +245,14 @@ WorkflowStateLoader = Any  # callable: () -> Mapping[str, Any]
 
 
 def _empty_workflow_state() -> Mapping[str, Any]:
+    return {}
+
+
+# AC-L8DOC1a: documentation_audit loader. Zero-arg callable returning the
+# parsed GET /api/tasks/audit payload (or {} on any failure). Default is
+# the empty loader so callers without a PD HTTP client get fail-open
+# behaviour without extra wiring.
+def _empty_documentation_audit() -> Mapping[str, Any]:
     return {}
 
 
@@ -289,6 +300,7 @@ class PDCalendarStateReader:
         mcp: MCPClient,
         calendar: Optional[CalendarClient] = None,
         workflow_state_loader: Optional[Any] = None,
+        documentation_audit_loader: Optional[Any] = None,
         calendar_lookahead_days: int = DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
         clock: Any = time.time,
     ) -> None:
@@ -299,6 +311,12 @@ class PDCalendarStateReader:
         self._mcp = mcp
         self._calendar = calendar
         self._workflow_state_loader = workflow_state_loader or _empty_workflow_state
+        # AC-L8DOC1a: zero-arg callable returning the parsed
+        # GET /api/tasks/audit payload. Default returns {} so callers
+        # without a PD HTTP client get fail-open behaviour.
+        self._documentation_audit_loader = (
+            documentation_audit_loader or _empty_documentation_audit
+        )
         self._calendar_lookahead_days = calendar_lookahead_days
         self._clock = clock
         self._cache: Optional[PDCalendarSnapshot] = None
@@ -346,6 +364,15 @@ class PDCalendarStateReader:
 
         workflow_state = dict(self._workflow_state_loader() or {})
 
+        # AC-L8DOC1a: documentation_audit. Fail-open on any loader error
+        # or non-mapping payload -- consumers branch on missing_count > 0,
+        # so {} is the canonical "nothing to surface" value.
+        try:
+            audit_raw = self._documentation_audit_loader() or {}
+            documentation_audit = dict(audit_raw) if isinstance(audit_raw, Mapping) else {}
+        except Exception:
+            documentation_audit = {}
+
         return PDCalendarSnapshot(
             projects=projects,
             tasks_by_status=tasks_by_status,
@@ -354,6 +381,7 @@ class PDCalendarStateReader:
             calendar_today=calendar_today,
             calendar_upcoming=calendar_upcoming,
             workflow_state=workflow_state,
+            documentation_audit=documentation_audit,
             captured_at=float(self._clock() if callable(self._clock) else self._clock),
         )
 

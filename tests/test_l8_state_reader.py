@@ -112,6 +112,7 @@ def _make_reader(
     pd_responses: Mapping[str, Any] | None = None,
     calendar: _FakeCalendar | None = None,
     workflow_state_loader: Any | None = None,
+    documentation_audit_loader: Any | None = None,
     calendar_lookahead_days: int = DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
     clock: Any = lambda: 1_700_000_000.0,
 ) -> tuple[PDCalendarStateReader, _FakeMCP]:
@@ -120,6 +121,7 @@ def _make_reader(
         mcp=mcp,
         calendar=calendar,
         workflow_state_loader=workflow_state_loader,
+        documentation_audit_loader=documentation_audit_loader,
         calendar_lookahead_days=calendar_lookahead_days,
         clock=clock,
     )
@@ -477,3 +479,61 @@ def test_reader_does_not_mutate_input_payload():
     # so the original payload list should be unchanged.
     snap.projects["dream"]  # access -- no exception
     assert pd[PD_TOOL_GET_PROJECTS] == original_projects
+
+
+# ---------------------------------------------------------------------------
+# AC-L8DOC1a: documentation_audit field
+# ---------------------------------------------------------------------------
+
+
+_AUDIT_PAYLOAD = {
+    "by_project": {
+        "dream": {
+            "total": 12,
+            "documented": 8,
+            "missing_tests": [{"id": "t1", "title": "Add wiki sync", "status": "todo"}],
+            "missing_wiki": [],
+            "missing_both": [{"id": "t2", "title": "EOD card", "status": "in_progress"}],
+            "project_name": "Dream",
+        },
+    },
+    "total": 12,
+    "documented": 8,
+    "coverage_pct": 66.7,
+}
+
+
+def test_documentation_audit_populated_from_loader():
+    reader, _ = _make_reader(
+        documentation_audit_loader=lambda: _AUDIT_PAYLOAD,
+    )
+    snap = reader.read()
+    assert snap.documentation_audit == _AUDIT_PAYLOAD
+    # Round-trip into StateSnapshot keeps the payload.
+    canonical = snap.to_state_snapshot()
+    assert canonical.documentation_audit == _AUDIT_PAYLOAD
+
+
+def test_documentation_audit_default_is_empty_dict():
+    """No loader given -> fail-open default is an empty mapping."""
+    reader, _ = _make_reader()
+    snap = reader.read()
+    assert snap.documentation_audit == {}
+    assert snap.to_state_snapshot().documentation_audit == {}
+
+
+def test_documentation_audit_graceful_on_loader_exception():
+    """Loader that raises must NOT crash the snapshot build."""
+    def boom() -> Mapping[str, Any]:
+        raise ConnectionError("PD unreachable")
+    reader, _ = _make_reader(documentation_audit_loader=boom)
+    snap = reader.read()
+    assert snap.documentation_audit == {}
+
+
+def test_documentation_audit_graceful_on_non_mapping_payload():
+    """Loader returning a non-mapping (e.g. a list, None, str) -> {}."""
+    for bad in (None, [], "not a dict", 42):
+        reader, _ = _make_reader(documentation_audit_loader=lambda b=bad: b)
+        snap = reader.read()
+        assert snap.documentation_audit == {}, f"non-mapping {bad!r} should yield {{}}"
