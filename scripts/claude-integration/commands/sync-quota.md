@@ -23,9 +23,24 @@ value never drifts more than 24h from reality.
 
    - **Session window:** find the line beginning with "Current session" (case-insensitive). The same paragraph contains "Resets in X hr Y min" (or "Resets in X min"). Compute `session_reset_at = now_utc + timedelta(hours=X, minutes=Y)`. Format as `YYYY-MM-DDTHH:MM:SSZ`.
 
-   - **Weekly window:** find the line containing "Weekly limits" or "All models". The same block contains "Resets <Weekday> <H:MM AM/PM>" (e.g. "Resets Tue 6:00 PM"). Compute the next occurrence of that weekday + time in Preston's local timezone, then convert to UTC ISO 8601 with timezone offset (NOT Z, since this is local). Use `+TZ:00` suffix.
+   - **Weekly window:** find the line containing "Weekly limits" or "All models". Within that block the reset text appears in ONE of two shapes -- the Anthropic UI flips between them without a deterministic preference (both observed 2026-05-17 within a few hours on the same page). Handle both:
 
-   If either label is missing from the page, log "[ABSENT]" for that window and skip its POST — partial re-sync is fine, don't fabricate.
+     - **Absolute shape:** "Resets `<Weekday>` `<H>`:`<MM>` `<AM|PM>`" (e.g. "Resets Tue 6:00 PM"). Compute the next occurrence of that weekday + time in the operator's local timezone, then format as ISO 8601 with the local UTC offset suffix (e.g. `2026-05-19T18:00:00-04:00`). Use the offset, NOT `Z`, since this anchors to local-clock wall time.
+
+     - **Relative shape:** "Resets in `<X>` hr `<Y>` min" (e.g. "Resets in 13 hr 11 min"). Same pattern as the session window. Compute `weekly_reset_at = now_utc + timedelta(hours=X, minutes=Y)`. Format as `YYYY-MM-DDTHH:MM:SSZ` (UTC Z-suffix).
+
+     If the weekly block exists but matches NEITHER pattern: fail loud. Print exactly:
+     ```
+     [WEEKLY-PARSE-ERROR] Block found but matches no known pattern.
+       Known patterns:
+         - "Resets <Weekday> <H>:<MM> <AM|PM>"
+         - "Resets in <X> hr <Y> min"
+       Raw text: <verbatim block content>
+       File a follow-up to AR-S3k-PARSER (2b05e937) with the new format.
+     ```
+     Skip the weekly POST. Session POST may still proceed. The verbatim raw text is the only way to add a third parser; don't try to guess.
+
+   If either label (Current session / Weekly limits) is absent from the page entirely, log "[ABSENT]" for that window and skip its POST — partial re-sync is fine, don't fabricate.
 
 6. **POST to the registry, one call per kind.** For each parsed value:
 
