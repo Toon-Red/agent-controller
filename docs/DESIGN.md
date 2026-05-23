@@ -149,6 +149,41 @@ cold and produce the expected output, the prompt is good enough
 for the LLM. The HumanEngine doesn't ship with production loops --
 it ships as the proof harness.
 
+### Environment Sufficiency (97346fa1 AC-AGENT-ENV1)
+
+Preston rule 2026-05-23 (verbatim): "It's more than just prompt. If
+the UI and such is not good, or tools available don't help with
+solving the tasks, or the user has to go outside the window to make
+progress, then it's not fully thought out yet, and it needs to be
+better prepared for."
+
+Three additional predicates run alongside the 3 shape predicates
+from 09ca6f69. The composite `prompt_humanly_executable` now runs
+all six.
+
+| predicate | what it bites |
+|---|---|
+| `prompt_has_ui_context_block` | `context_block.ui` is a non-empty dict carrying actual content payloads (file content, diff text, task records) -- not just paths/IDs. Heuristic: bare strings < 200 chars with no whitespace look like paths and fail the check when they're the entire ui payload. |
+| `prompt_tool_allowlist_covers_task` | `tools_block` satisfies `level_gates.yaml > tool_requirements[<role>-<level>[-<category>]]` (resolution: exact first, then role+level fallback, then fail-closed). Each rule supports `must_have_all_of` + `must_have_at_least_one_of`. |
+| `prompt_scope_is_self_contained_no_window_escape` | `task_block.done_when` + `outputs` don't contain window-escape verbs (user, preston, manual, external, wait for, someone) UNLESS the tools_block carries an observer (wait_for_event / observe / poll / subscribe / screenshot). |
+
+### Auto-file findings (dedup-by-content-hash)
+
+Every composite failure auto-files to
+`data/prompt-validation-findings/<sha>.json` with sha256 of
+(role + level + predicate + reason). Repeat failures bump
+`seen_count` rather than re-filing. Same shape as the wiki_health
+audit's auto-file mechanism (`5214e749`). Findings surface in
+operator dashboards; no auto-conversion to PD tasks yet --
+Discord ping volume is observed before that layer is added.
+
+### Subset helpers + CLI
+
+`check_env_only(prompt)` / `check_shape_only(prompt)` run only
+the 3 env / 3 shape predicates respectively. The dry-run CLI
+gains `--check-env-only` for fast Preston spot-checks of just the
+env layer (UI block, tool coverage, no-window-escape).
+
 ### Sibling registry (honest-stop)
 
 Per the dispatch's `4ae126d2`-coupling guardrail, this dispatch

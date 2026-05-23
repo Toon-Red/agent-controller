@@ -72,6 +72,16 @@ def _compose_l4_coder(task: Mapping[str, Any],
             "test_results": test_results,
             "acceptance_criteria": acceptance,
             "task_id": task.get("id"),
+            # 97346fa1: ui block carries the actual surfaces the agent
+            # operates on (file content, test logs), not just paths.
+            # Production composers would hydrate these from the live
+            # files; the synthetic stub here surfaces the names so the
+            # env validator can confirm the shape.
+            "ui": {
+                "files_to_read_first": files_changed,
+                "tests_to_run_first": tests,
+                "summary": "L4 coder operates on the file content + test logs above.",
+            },
         },
         "task_block": {
             "inputs": inputs_refs,
@@ -107,6 +117,14 @@ def _compose_l5_manager(task: Mapping[str, Any],
                 "Coder rubric: all tests pass, files_changed is non-empty, "
                 "regression_info is null."
             ),
+            "ui": {
+                "task_record_summary": (
+                    f"task_id={task.get('id')!r} status={task.get('status')!r} "
+                    f"with {len(deliverables)} deliverable(s) "
+                    f"and {len(decisions)} prior decision(s)"
+                ),
+                "rubric_text": "Apply the coder rubric above to the L4 output.",
+            },
         },
         "task_block": {
             "inputs": "${deliverables}, ${decisions}, ${test_results}, ${rubric}",
@@ -147,6 +165,17 @@ def _compose_l7_dispatch(task: Mapping[str, Any],
             "task_id": task.get("id"),
             "task_title": task.get("title"),
             "task_priority": task.get("priority", "normal"),
+            "ui": {
+                "project_summary": (
+                    f"Project {pid!r} in lifecycle "
+                    f"{project.get('lifecycle')!r} with "
+                    f"{len(project.get('open_tasks') or [])} open task(s)."
+                ),
+                "task_summary": (
+                    f"task={task.get('id')!r} title={task.get('title')!r} "
+                    f"priority={task.get('priority', 'normal')!r}"
+                ),
+            },
         },
         "task_block": {
             "inputs": (

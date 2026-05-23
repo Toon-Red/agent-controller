@@ -45,3 +45,39 @@ transitions:
       - principle_customer_cited
       - principle_data_cited
       - principle_cost_evaluated
+
+# ---------------------------------------------------------------------------
+# 97346fa1 AC-AGENT-ENV1: per-role tool requirements
+# ---------------------------------------------------------------------------
+# Key shape: "<role>-<level>" or "<role>-<level>-<task.category>".
+# Resolved by scripts.l_prompt.prompt_tool_allowlist_covers_task in
+# this order: exact (role+level+category), generic (role+level), then
+# fail-closed if no match. Don't silently pass an unverified role.
+#
+# Rules:
+#   must_have_all_of:        every tool name listed MUST appear in prompt.tools_block.
+#   must_have_at_least_one_of: at least one tool name from the list MUST appear.
+# Combine both keys when a role needs both unconditional + alternatives
+# (e.g. coder-l4-bug-fix demands read_file + run_tests AND at least one of
+# edit_file/write_file).
+tool_requirements:
+  coder-L4-bug:
+    must_have_all_of: [read_file, run_tests]
+    must_have_at_least_one_of: [edit_file, write_file]
+  coder-L4-feature:
+    must_have_all_of: [read_file, edit_file, run_tests]
+  coder-L4:
+    must_have_all_of: [read_file, run_tests]
+    must_have_at_least_one_of: [edit_file, write_file]
+  qa-L4:
+    must_have_all_of: [read_file, run_tests]
+  playtester-L4:
+    must_have_at_least_one_of: [screenshot, browser_navigate, browser_open]
+  grader-L4:
+    must_have_all_of: [read_file, list_files]
+  manager-L5:
+    must_have_all_of: [read_pd_task, update_pd_task]
+  queen-L6:
+    must_have_all_of: [spawn_agent, agent_status]
+  dispatch-L7:
+    must_have_all_of: [list_pd_tasks, read_pd_task, send_l7_dispatch]

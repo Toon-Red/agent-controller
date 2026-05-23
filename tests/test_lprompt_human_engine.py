@@ -26,12 +26,15 @@ from scripts.l_prompt import LPrompt, PromptValidationError  # noqa: E402
 def _good_prompt() -> LPrompt:
     return {
         "level": "L4", "agent_role": "coder",
-        "context_block": {"foo": "x"},
+        "context_block": {
+            "foo": "x",
+            "ui": {"file_content": "def foo(): return 1\n"},
+        },
         "task_block": {
             "inputs": "${foo}", "outputs": ["modified file"],
             "done_when": "test:test_foo passes (file `foo.py`)",
         },
-        "tools_block": ["read_file"],
+        "tools_block": ["read_file", "edit_file", "run_tests"],
         "examples_block": [{"task": "x", "output": {"y": 1}}],
     }
 
@@ -175,3 +178,12 @@ def test_dry_run_cli_unknown_role_returns_exit_2(capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "no composer" in err
+
+
+def test_dry_run_cli_check_env_only_flag(capsys):
+    mod = _load_cli_module()
+    rc = mod.main(["--task", "fake-env-id", "--level", "L4", "--role", "coder",
+                    "--check-env-only"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "env" in out.lower()

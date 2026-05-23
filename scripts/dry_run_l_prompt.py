@@ -67,25 +67,50 @@ def main(argv: list[str] | None = None) -> int:
                          help="agent role (coder/qa/manager/dispatch/...)")
     parser.add_argument("--json", action="store_true",
                          help="emit the prompt as JSON instead of human text")
+    parser.add_argument("--check-env-only", action="store_true",
+                         help="run ONLY the 3 environment-sufficiency "
+                              "predicates (97346fa1) for fast spot-checks")
     args = parser.parse_args(argv)
 
     from scripts.prompt_emitter import build_prompt
     from scripts.l_prompt import (
-        prompt_humanly_executable, PromptValidationError,
+        prompt_humanly_executable, check_env_only, PromptValidationError,
     )
 
     task = _fetch_task(args.task)
     project = _fetch_project(task.get("project_id", ""))
+    # When --check-env-only is set, attempt the composer (which still
+    # runs full validation -- the env predicates are part of build_prompt
+    # too). On failure, retry the env-only check against the would-be
+    # prompt so the operator can see env-only diagnostics in isolation.
     try:
         prompt = build_prompt(task, project, args.level, args.role)
         valid = True
-        validator_msg = "OK: prompt passes all 3 validators."
+        if args.check_env_only:
+            ok, fails = check_env_only(prompt)
+            validator_msg = (
+                "OK: env predicates pass (env-only mode)."
+                if ok else f"FAIL (env-only): {fails}"
+            )
+            valid = ok
+        else:
+            validator_msg = "OK: prompt passes all 6 validators."
     except PromptValidationError as exc:
-        # Run the composite validator manually so we still print
-        # the would-be prompt + the per-validator failures.
         prompt = None
         valid = False
-        validator_msg = f"FAIL: {exc.failed_predicates}"
+        if args.check_env_only:
+            env_fails = [f for f in exc.failed_predicates
+                         if any(tag in f for tag in (
+                             "ui_context_block", "tool_allowlist_covers_task",
+                             "no_window_escape"))]
+            validator_msg = (
+                f"FAIL (env-only): {env_fails}"
+                if env_fails
+                else "OK (env-only): env predicates pass; shape failures only."
+            )
+            valid = not env_fails
+        else:
+            validator_msg = f"FAIL: {exc.failed_predicates}"
     except KeyError as exc:
         print(f"FATAL: no composer for "
               f"({args.level!r}, {args.role!r}): {exc}",
