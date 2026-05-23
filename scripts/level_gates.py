@@ -285,15 +285,228 @@ class LevelGateViolation(BaseException):
     layer that holds the source record is responsible for surfacing
     + waiting for the failing predicate to clear, never for working
     around the refusal.
+
+    d15de2b4 extension: ``failed_principles`` (separate list) carries
+    Amazon-LP-friendly principle names when the violation came from
+    a ``principle_*`` predicate. ``failed_predicates`` stays for the
+    raw predicate strings the gate function returned.
     """
 
     def __init__(self, *, gate_id: str, failed_predicates: list,
-                 failing_record_id: str, transition: str) -> None:
+                 failing_record_id: str, transition: str,
+                 failed_principles: list | None = None) -> None:
         self.gate_id = gate_id
         self.failed_predicates = list(failed_predicates)
+        self.failed_principles = list(failed_principles or [])
         self.failing_record_id = failing_record_id
         self.transition = transition
+        suffix = ""
+        if self.failed_principles:
+            suffix = f"; principles: {self.failed_principles}"
         super().__init__(
             f"{transition} blocked by {gate_id} on record "
-            f"{failing_record_id!r}: {self.failed_predicates}"
+            f"{failing_record_id!r}: {self.failed_predicates}{suffix}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Principle predicates (d15de2b4)
+# ---------------------------------------------------------------------------
+#
+# Amazon Leadership Principles enforced as machine-checked gates on every
+# L-transition. Stacked with the existing gate_* predicates -- ALL must
+# pass. Each principle: (record: dict) -> (passed: bool, failed: list[str]).
+# The `record` is a flat dict typically derived from a task wiki's
+# frontmatter; the optional `body` key carries the wiki body text for
+# checks that need to scan "Decision:" lines.
+
+import re as _re
+from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+from pathlib import Path as _Path
+
+_USER_STORY_RE = _re.compile(r"\b(?:request|user_story):[a-f0-9]{8}\b")
+_RESEARCH_RE = _re.compile(r"\bresearch:[a-f0-9]{8}\b")
+_TEST_RE = _re.compile(r"\btest:[a-z0-9_]+\b")
+_COMMIT_RE = _re.compile(r"\b[a-f0-9]{7,40}\b")
+_DECISION_LINE_RE = _re.compile(r"^\s*Decision:\s*(.+)$", _re.MULTILINE)
+
+
+def _str(v: object) -> str:
+    return str(v).strip() if v is not None else ""
+
+
+def principle_customer_cited(record: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Customer Obsession: ``customer_impact`` non-empty AND body cites
+    at least one ``request:<hex8>`` or ``user_story:<hex8>``."""
+    fails: list[str] = []
+    if not _str(record.get("customer_impact")):
+        fails.append("record.customer_impact is empty or missing")
+    body = _str(record.get("body"))
+    if not _USER_STORY_RE.search(body):
+        fails.append(
+            "record body cites no request:<hex8> or user_story:<hex8>"
+        )
+    return (not fails, fails)
+
+
+def _load_owners_yaml(owners_yaml_path: _Path | None = None) -> set[str]:
+    """Read active owner ids from wiki/owners.yaml. Empty set on
+    missing/unreadable -- caller treats absence as 'no validation'."""
+    try:
+        import yaml  # type: ignore
+        p = owners_yaml_path or (_Path(__file__).resolve().parent.parent.parent
+                                  / "pipeline-dashboard" / "wiki" / "owners.yaml")
+        if not p.is_file():
+            return set()
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        out: set[str] = set()
+        for entry in (data.get("owners") or []):
+            if isinstance(entry, Mapping) and entry.get("active", True):
+                oid = entry.get("id")
+                if isinstance(oid, str) and oid.strip():
+                    out.add(oid.strip())
+        return out
+    except Exception:
+        return set()
+
+
+def principle_owner_declared(record: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Ownership: ``owner`` frontmatter non-empty AND in the
+    project's wiki/owners.yaml active list (when reachable)."""
+    fails: list[str] = []
+    owner = _str(record.get("owner"))
+    if not owner:
+        fails.append("record.owner is empty or missing")
+        return (False, fails)
+    owners = _load_owners_yaml(record.get("_owners_yaml"))
+    if owners and owner not in owners:
+        fails.append(
+            f"owner {owner!r} not in wiki/owners.yaml active list "
+            f"({sorted(owners)})"
+        )
+    return (not fails, fails)
+
+
+def principle_data_cited(record: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Dive Deep: every 'Decision:' line in the body cites at least one
+    of research:<hex8>, test:<id>, or a commit SHA. Empty body = pass
+    (no decisions to cite)."""
+    body = _str(record.get("body"))
+    fails: list[str] = []
+    decisions = _DECISION_LINE_RE.findall(body)
+    for i, line in enumerate(decisions, start=1):
+        has_research = bool(_RESEARCH_RE.search(line))
+        has_test = bool(_TEST_RE.search(line))
+        has_commit = bool(_COMMIT_RE.search(line))
+        if not (has_research or has_test or has_commit):
+            preview = line.strip()[:80]
+            fails.append(
+                f"Decision line #{i} cites no research/test/commit: "
+                f"{preview!r}"
+            )
+    return (not fails, fails)
+
+
+def principle_gates_passed(record: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Insist on the Highest Standards: PD's close_gates evaluator
+    returns 0 failures for this record's task_id.
+
+    Implemented as a thin HTTP shim against PD. Fail-closed: if PD is
+    unreachable or returns a non-200 unexpectedly, treat the principle
+    as failed (operator must verify by hand or unblock PD).
+    """
+    tid = _str(record.get("task_id") or record.get("id"))
+    pid = _str(record.get("project_id"))
+    if not tid:
+        return (False, ["record has no task_id or id; cannot verify gates"])
+    if not pid:
+        return (False, ["record has no project_id; cannot verify gates"])
+    try:
+        import os as _os, json as _json, urllib.request as _ur
+        base = _os.environ.get("PD_API_BASE", "http://127.0.0.1:5100")
+        # Use a no-op update (POST with empty body) -- PD's update_task
+        # returns the close_blocked sentinel without mutating when the
+        # gates would refuse. For a no-op (no status change), gates
+        # do NOT run. So we read the task via GET and let the caller
+        # observe quality.missing / open close-blocked finding markers.
+        url = f"{base}/api/projects/{pid}/tasks/{tid}"
+        with _ur.urlopen(url, timeout=3) as r:
+            data = _json.loads(r.read())
+        # Heuristic surrogate (since the real evaluation only happens on
+        # status flip): a task whose quality.missing includes 'tests' AND
+        # whose status is in-flight is FAILING close gates.
+        q = (data.get("quality") or {})
+        missing = set(q.get("missing") or [])
+        if missing and "tests" in missing and data.get("status") != "done":
+            return (False, [
+                f"close-gate surrogate failure: quality.missing={sorted(missing)} "
+                f"(task is not done AND lacks tests)"
+            ])
+        return (True, [])
+    except Exception as exc:
+        return (False, [
+            f"could not verify close gates via PD HTTP: "
+            f"{type(exc).__name__}: {exc}"
+        ])
+
+
+_ALLOWED_COMPLEXITIES = {"S", "M", "L", "XL"}
+
+
+def principle_cost_evaluated(record: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Frugality: ``complexity`` in S/M/L/XL AND ``value_score`` is an
+    int in 1..10. Per the dispatch, REQUIRED only for L7->L8; other
+    transitions exempt by NOT registering this principle in the YAML."""
+    fails: list[str] = []
+    cx = _str(record.get("complexity"))
+    if cx not in _ALLOWED_COMPLEXITIES:
+        fails.append(
+            f"complexity {cx!r} not in {sorted(_ALLOWED_COMPLEXITIES)}"
+        )
+    vs = record.get("value_score")
+    try:
+        vs_int = int(vs)
+        if not (1 <= vs_int <= 10):
+            fails.append(f"value_score {vs!r} not in [1, 10]")
+    except (TypeError, ValueError):
+        fails.append(f"value_score {vs!r} is not an integer")
+    return (not fails, fails)
+
+
+def principle_no_indefinite_stall(record: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Bias for Action: ``updated_at`` within 7 days OR ``status`` is
+    ``blocked`` AND ``blocked_reason`` non-empty."""
+    status = _str(record.get("status"))
+    if status == "blocked":
+        if not _str(record.get("blocked_reason")):
+            return (False, [
+                "status is 'blocked' but blocked_reason is empty"
+            ])
+        return (True, [])
+    raw = _str(record.get("updated_at"))
+    if not raw:
+        return (False, ["updated_at missing"])
+    try:
+        candidate = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+        dt = _dt.fromisoformat(candidate)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_tz.utc)
+        age = _dt.now(_tz.utc) - dt
+        if age > _td(days=7):
+            return (False, [
+                f"updated_at is {age.days}d old (limit: 7d) and status "
+                f"is not 'blocked'"
+            ])
+        return (True, [])
+    except ValueError:
+        return (False, [f"updated_at {raw!r} is not parseable ISO 8601"])
+
+
+ALL_PRINCIPLES: dict[str, str] = {
+    "principle_customer_cited": "Customer Obsession",
+    "principle_owner_declared": "Ownership",
+    "principle_data_cited": "Dive Deep",
+    "principle_gates_passed": "Insist on the Highest Standards",
+    "principle_cost_evaluated": "Frugality",
+    "principle_no_indefinite_stall": "Bias for Action",
+}

@@ -1,0 +1,47 @@
+# Per-transition gate + principle enforcement (d15de2b4 AC-PRINCIPLES1).
+#
+# Each transition lists `gates` (the 5 frozen predicates from 3f83494b)
+# and `principles` (the 6 Amazon-LP predicates from d15de2b4). The
+# enforcer in scripts/level_gate_enforcer.py runs both lists; ANY
+# failure raises LevelGateViolation with all failing names.
+#
+# Stacked semantics: every entry must pass for the transition to
+# proceed. Principles can be added or removed per transition by
+# editing this file -- no code change required (PRINCIPLE_REGISTRY
+# resolves names at lookup time).
+#
+# Per the d15de2b4 honest-stop: principle_gates_passed is wired only
+# to transitions where the L7 dispatch can hydrate `task_id` +
+# `project_id` from PD. L4->L5 omits it because L4 records are local
+# to the swarm member and may not be in PD yet.
+transitions:
+  L4_to_L5:
+    gates: [gate_l4_to_l5__tests_run]
+    principles:
+      - principle_owner_declared
+      - principle_data_cited
+      - principle_no_indefinite_stall
+  L5_to_L6:
+    gates: [gate_l5_to_l6__quality_review]
+    principles:
+      - principle_owner_declared
+      - principle_gates_passed
+      - principle_no_indefinite_stall
+  L6_to_L7:
+    gates: [gate_l6_to_l7__swarm_complete]
+    principles:
+      - principle_owner_declared
+      - principle_gates_passed
+  L7_to_L8:
+    gates: [gate_l7_to_l8__green_ci]
+    principles:
+      - principle_customer_cited
+      - principle_owner_declared
+      - principle_cost_evaluated
+      - principle_gates_passed
+  L8_to_Preston:
+    gates: [gate_l8_to_preston__decision_needed]
+    principles:
+      - principle_customer_cited
+      - principle_data_cited
+      - principle_cost_evaluated

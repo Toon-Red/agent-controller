@@ -143,17 +143,21 @@ def test_ping_failure_does_not_swallow_violation(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_enforce_canonical_lookup_for_l4_to_l5(tmp_path):
-    # task with no test_results -> L4->L5 gate refuses.
+    # task with no test_results -> L4->L5 gate refuses. Pass yaml_path
+    # to a non-existent file so the legacy gates-only fallback runs
+    # (these tests pre-date d15de2b4's YAML+principles bundle).
     with pytest.raises(LevelGateViolation) as exc:
         enf.enforce("L4->L5", {"id": "t1"},
-                     ping=False, violations_dir=tmp_path)
+                     ping=False, violations_dir=tmp_path,
+                     yaml_path=tmp_path / "missing.yaml")
     assert exc.value.gate_id == "gate_l4_to_l5__tests_run"
 
 
 def test_enforce_passes_for_l4_to_l5_with_tests_recorded(tmp_path):
     enf.enforce("L4->L5",
                  {"id": "t1", "test_results": {"passed_count": 5}},
-                 ping=False, violations_dir=tmp_path)
+                 ping=False, violations_dir=tmp_path,
+                 yaml_path=tmp_path / "missing.yaml")
 
 
 def test_enforce_unknown_transition_raises_key_error():
@@ -209,7 +213,13 @@ def test_l7_dispatch_proceeds_when_source_task_has_tests(tmp_path):
     req = L7DispatchRequest(
         iteration_id="iter-1", pd_project_id="proj-a", pd_task_id="t-a",
     )
-    source = {"id": "t-a", "test_results": {"passed_count": 3}}
+    # d15de2b4: L4->L5 also runs principles (owner_declared,
+    # data_cited (empty body passes), no_indefinite_stall). Hydrate
+    # owner + updated_at so the principle stack is satisfied.
+    from datetime import datetime, timezone
+    source = {"id": "t-a", "test_results": {"passed_count": 3},
+              "owner": "preston",
+              "updated_at": datetime.now(timezone.utc).isoformat()}
     with patch.object(enf, "DEFAULT_VIOLATIONS_DIR", tmp_path):
         resp = client.dispatch(req, source_task=source)
     assert posted  # POST was issued
@@ -242,14 +252,17 @@ def test_l7_dispatch_backward_compatible_without_source_task(tmp_path):
 
 def test_l8_pm_observe_progress_blocks_on_non_green_ci(tmp_path):
     """When enforce_gate=True and the project's qa run is not green
-    for today, the L7->L8 gate raises and no escalation is produced."""
+    for today, the L7->L8 gate raises and no escalation is produced.
+
+    d15de2b4: forced gates-only fallback via yaml_path so this test
+    pins the green-ci gate specifically, not the principle stack."""
     from scripts.l8_project_manager import L7ProgressMessage
-    # Build a minimal L8ProjectManager-free path by exercising the
-    # gate directly via the same code path the wiring uses.
     pid = "proj-no-qa"
     with patch.object(enf, "DEFAULT_VIOLATIONS_DIR", tmp_path):
         with pytest.raises(LevelGateViolation) as exc:
-            enf.enforce("L7->L8", pid, ping=False, violations_dir=tmp_path)
+            enf.enforce("L7->L8", pid, ping=False,
+                        violations_dir=tmp_path,
+                        yaml_path=tmp_path / "missing.yaml")
     assert exc.value.gate_id == "gate_l7_to_l8__green_ci"
 
 
@@ -267,7 +280,8 @@ def test_l8_to_preston_gate_blocks_payload_missing_rationale(tmp_path):
         "decision_needed_by": None,
     }
     with pytest.raises(LevelGateViolation) as exc:
-        enf.enforce("L8->Preston", payload, ping=False, violations_dir=tmp_path)
+        enf.enforce("L8->Preston", payload, ping=False, violations_dir=tmp_path,
+                yaml_path=tmp_path / "missing.yaml")
     assert exc.value.gate_id == "gate_l8_to_preston__decision_needed"
     assert any("rationale" in f for f in exc.value.failed_predicates)
 
@@ -280,7 +294,8 @@ def test_l8_to_preston_gate_passes_on_complete_payload(tmp_path):
         "recommendation": "ship",
         "decision_needed_by": None,
     }
-    enf.enforce("L8->Preston", payload, ping=False, violations_dir=tmp_path)
+    enf.enforce("L8->Preston", payload, ping=False, violations_dir=tmp_path,
+                yaml_path=tmp_path / "missing.yaml")
 
 
 # ---------------------------------------------------------------------------

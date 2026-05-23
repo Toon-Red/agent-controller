@@ -72,6 +72,36 @@ infrastructure change required when the principles ship -- they
 register as additional callables in a parallel `PRINCIPLE_TO_GATE`
 mapping.
 
+### Principles (d15de2b4 AC-PRINCIPLES1)
+
+Six Amazon-LP-aligned principle predicates run alongside the five
+`gate_*` predicates on every L-transition. Stacked semantics: ALL
+must pass. Wiring lives in `level_gates.yaml` (per-transition list of
+gates + principles); `PRINCIPLE_REGISTRY` in
+`scripts/level_gate_enforcer.py` resolves names to callables.
+
+| principle | predicate | enforced on | why it bites |
+|---|---|---|---|
+| Customer Obsession | `principle_customer_cited` | L7->L8, L8->Preston | record must declare `customer_impact` AND body cites `request:<hex8>` or `user_story:<hex8>` -- no anonymous escalations |
+| Ownership | `principle_owner_declared` | L4->L5, L5->L6, L6->L7, L7->L8 | frontmatter `owner` non-empty AND in `wiki/owners.yaml` active list -- nobody handed off to "the team" |
+| Dive Deep | `principle_data_cited` | L4->L5, L8->Preston | every `Decision:` line cites research/test/commit -- vibes-only decisions blocked |
+| Insist on the Highest Standards | `principle_gates_passed` | L5->L6, L6->L7, L7->L8 | PD's close-gates evaluator returns 0 failures for the task (HTTP shim) -- can't promote work that won't close cleanly |
+| Frugality | `principle_cost_evaluated` | L7->L8, L8->Preston | frontmatter has `complexity` in `S/M/L/XL` AND `value_score` 1..10 -- no unmeasured escalations |
+| Bias for Action | `principle_no_indefinite_stall` | L4->L5, L5->L6 | `updated_at` within 7 days OR `status=blocked` with `blocked_reason` -- nothing sits forever |
+
+Violations: `LevelGateViolation` gains a `failed_principles` field
+separate from `failed_predicates`. The Discord ping + persisted JSON
+both name the failing principle by predicate name (operators learn
+the Amazon-LP mapping via `ALL_PRINCIPLES` constant + DESIGN.md
+table).
+
+Honest-stop: `principle_gates_passed` is a thin HTTP shim against PD
+since the close-gate evaluator only fires on a real status flip. The
+shim uses a heuristic surrogate (task's `quality.missing` includes
+`tests` AND status is in-flight) and fails-closed when PD is
+unreachable. A proper PD endpoint exposing the dry-run close-gate
+evaluator is filed as a follow-on.
+
 ### Why `BaseException`
 
 `LevelGateViolation` inherits from `BaseException` (not `Exception`)
