@@ -18,7 +18,8 @@ def main() -> int:
               "invocations will fail.")
         return 0
     try:
-        proc = subprocess.run(
+ from windowless_subprocess import run as _wl_run  # d48d4ddb
+        proc = _wl_run(
             ["npx", "claude-flow", "--version"],
             capture_output=True, text=True, timeout=5,
         )
