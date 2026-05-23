@@ -273,10 +273,30 @@ class L7DispatchClient:
         self.timeout = timeout
         self._opener = opener
 
-    def dispatch(self, request: L7DispatchRequest
+    def dispatch(self, request: L7DispatchRequest,
+                  *, source_task: Optional[Mapping[str, Any]] = None,
                   ) -> Optional[L7DispatchResponse]:
         """Send a dispatch request to L7. Returns the response on
-        success; None on transport / protocol failure."""
+        success; None on transport / protocol failure.
+
+        47c52660: when ``source_task`` is provided, the L4->L5 gate
+        runs first via ``scripts.level_gate_enforcer.enforce``. If
+        the source task hasn't recorded a test run, a
+        ``LevelGateViolation`` propagates and the HTTP POST is never
+        issued. The L8 caller that constructed the request is
+        responsible for surfacing + waiting; the dispatch client
+        never auto-fixes the source.
+
+        Callers without a hydrated task dict in hand keep the
+        backward-compatible call shape (no ``source_task`` -> no gate
+        check). A follow-on hydrates the gate at every dispatch site
+        once PD-task-fetch-on-dispatch is wired.
+        """
+        if source_task is not None:
+            # Import locally so the gate dependency is lazy -- old
+            # callers that never pass source_task don't pay the cost.
+            from scripts.level_gate_enforcer import enforce
+            enforce("L4->L5", source_task)
         body = json.dumps(request.to_wire()).encode("utf-8")
         req = urllib.request.Request(
             self.endpoint, data=body,

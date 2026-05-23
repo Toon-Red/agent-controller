@@ -518,6 +518,7 @@ class L8ProjectManager:
         *,
         snapshot: Optional[StateSnapshot] = None,
         dispatch: bool = True,
+        enforce_gate: bool = False,
     ) -> Optional[L8Output]:
         """Consume one L7 -> L8 progress message; escalate if material.
 
@@ -525,7 +526,24 @@ class L8ProjectManager:
         case; L8 only speaks up when there's something to say). Returns
         an :class:`L8Output` with ``kind="escalation"`` and ``surface=
         DISCORD_ASYNC`` when a material trajectory shift was detected.
+
+        47c52660: when ``enforce_gate=True``, the L7->L8 gate runs
+        BEFORE the trajectory observer fires -- if the project's qa
+        run isn't green for today, ``LevelGateViolation`` propagates
+        and no escalation is constructed. Off by default during the
+        AC-LEVEL-WIRE1 rollout so existing test fixtures + the
+        progress-observer suite stay green; production loop runtime
+        flips it on at boot once green-qa observability is in
+        place.
         """
+        if enforce_gate:
+            from scripts.level_gate_enforcer import enforce
+            pid = ""
+            ct = message.current_task or {}
+            if isinstance(ct, Mapping):
+                pid = str(ct.get("project_id") or ct.get("pd_project_id") or "")
+            if pid:
+                enforce("L7->L8", pid)
         deltas = self._trajectory.observe(message)
         if not deltas:
             return None

@@ -269,3 +269,31 @@ ALL_GATES: dict[str, str] = {
     "gate_l7_to_l8__green_ci": "L7.md",
     "gate_l8_to_preston__decision_needed": "L8.md",
 }
+
+
+# ---------------------------------------------------------------------------
+# Enforcement exception (47c52660)
+# ---------------------------------------------------------------------------
+
+class LevelGateViolation(BaseException):
+    """Raised by ``scripts.level_gate_enforcer.enforce_transition`` when
+    a level-gate predicate refuses a transition.
+
+    Inherits from ``BaseException`` (not ``Exception``) so it cannot be
+    swallowed by ``except Exception`` -- the whole point is the
+    violation must propagate to the L7/L8 caller. The orchestrator
+    layer that holds the source record is responsible for surfacing
+    + waiting for the failing predicate to clear, never for working
+    around the refusal.
+    """
+
+    def __init__(self, *, gate_id: str, failed_predicates: list,
+                 failing_record_id: str, transition: str) -> None:
+        self.gate_id = gate_id
+        self.failed_predicates = list(failed_predicates)
+        self.failing_record_id = failing_record_id
+        self.transition = transition
+        super().__init__(
+            f"{transition} blocked by {gate_id} on record "
+            f"{failing_record_id!r}: {self.failed_predicates}"
+        )
