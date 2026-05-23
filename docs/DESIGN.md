@@ -102,7 +102,84 @@ shim uses a heuristic surrogate (task's `quality.missing` includes
 unreachable. A proper PD endpoint exposing the dry-run close-gate
 evaluator is filed as a follow-on.
 
-### Why `BaseException`
+---
+
+## LPrompt + HumanEngine (09ca6f69 AC-HUMAN-ENGINE1)
+
+Every L4/L5/L6/L7 agent invocation goes through a fixed 5-block
+prompt shape (`scripts/l_prompt.LPrompt`):
+
+```python
+class LPrompt(TypedDict, total=False):
+    level: str          # L4 | L5 | L6 | L7
+    agent_role: str     # coder | qa | manager | queen | dispatch | ...
+    context_block: dict[str, Any]   # all data the agent needs
+    task_block: dict[str, Any]      # inputs -> outputs -> done_when
+    tools_block: list[str]          # hard-coded tool allowlist
+    examples_block: list[dict]      # 1-2 golden output shapes
+```
+
+### Validator predicates
+
+| validator | what it bites |
+|---|---|
+| `prompt_is_self_contained` | every `${ref}` / `{{ref}}` in task_block resolves to a key in context_block; no "go look elsewhere" |
+| `prompt_has_done_when` | task_block.done_when references a test name / file path / record id / callable / count assertion / exit code; pure prose ("looks reasonable") rejected |
+| `prompt_has_tool_allowlist` | tools_block is a non-empty list of strings; empty list = unbounded scope, refused |
+| `prompt_humanly_executable` | composite: all 3 above must pass |
+
+`validate_or_raise(prompt, level, role)` raises
+`PromptValidationError(LevelGateViolation)` -- propagates as
+`BaseException`, can't be swallowed by `except Exception`.
+
+### HumanEngine (NOT a production engine)
+
+`scripts/human_engine.HumanEngine` is a VALIDATION harness.
+`run(prompt, *, timeout_sec=600)`:
+  1. Validates via `validate_or_raise` (broken prompt never reaches disk).
+  2. Writes prompt to `data/human-engine/<ts>/<level>-<role>.md`.
+  3. Best-effort Discord ping with the file path.
+  4. Polls every `poll_interval_sec` for the sibling
+     `<level>-<role>.response.md` to appear.
+  5. Parses the response's YAML frontmatter `outputs:` block.
+  6. Returns the dict OR raises `HumanEngineTimeout` (BaseException).
+
+The Preston-on-the-keyboard test: if Preston can read the prompt
+cold and produce the expected output, the prompt is good enough
+for the LLM. The HumanEngine doesn't ship with production loops --
+it ships as the proof harness.
+
+### Sibling registry (honest-stop)
+
+Per the dispatch's `4ae126d2`-coupling guardrail, this dispatch
+ships a NEW `AGENT_ENGINE_REGISTRY: dict[str, Callable]` in
+`scripts/human_engine.py` rather than retrofitting the existing
+planning/scheduling/learning engine registry from `4ae126d2`
+(those are EOD-step engines, different concept). Agent engines
+implement `run(prompt) -> dict`; the registry pattern mirrors
+`engines.registry` but operates on LPrompts.
+
+### Per-(level, role) composers prevent context bleed
+
+`scripts/prompt_emitter.py::build_prompt(task, project, level, role)`
+dispatches to one of `_COMPOSERS[(level, role)]`. L4 coder sees
+file paths + tests + acceptance; NOT project_state. L7 dispatch
+sees project_state + open_tasks; NOT raw file diffs. Cross-level
+bleed is structurally impossible because each (level, role) has
+its own composer function -- the L4 composer doesn't know how to
+read L7 strategic context. Missing (level, role) raises KeyError
+so the operator sees the gap immediately.
+
+### Dry-run CLI
+
+`python scripts/dry_run_l_prompt.py --task <id> --level L4 --role coder`
+builds + validates + prints the prompt WITHOUT engine invocation.
+Operator dry-run for prompt reasonableness before turning the LLM
+loose. `--json` emits the structured payload + validator report.
+
+---
+
+### Why `BaseException` (cross-cutting)
 
 `LevelGateViolation` inherits from `BaseException` (not `Exception`)
 so a future `except Exception` block in the L7/L8 dispatch path
